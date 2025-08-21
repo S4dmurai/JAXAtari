@@ -70,7 +70,8 @@ PLATFORMS = jnp.array([
     [112, 135, 48, 3]  # 1.Floor Right
 ])
 PLATFORMS_X = jnp.array([[160, 0], [48, 112], [128, 31], [64, 96]])
-PLATFORMS_Y = jnp.array([175, 135, 195, 57])
+LEVEL_Y= jnp.array([175, 135, 95, 57])  # x positions of platforms
+PLATFORMS_Y = jnp.array([175, 135, 95, 57])
 # --- Pow_Block params ---
 POW_BLOCK = jnp.array([[72, 141, 16, 7]])  # x, y, w, h
 
@@ -159,6 +160,26 @@ class MarioBrosInfo(NamedTuple):  # Copied from jax_kangaroo.py ln.186-187
 class MarioBrosConstants(NamedTuple):
     SCREEN_WIDTH: int = 160
     SCREEN_HEIGHT: int = 210
+
+
+def level_supported(x: jnp.ndarray, ew: int, level) -> jnp.ndarray:
+    """
+    Is [x, x+ew] horizontally over ANY platform on the given level index?
+    Works with split platforms. No boolean indexing; JIT-safe.
+    """
+    lvl = jnp.int32(level)                 # silence the “int” type warning
+    y = LEVEL_Y[lvl]                       # scalar
+
+    px, py, pw = PLATFORMS[:, 0], PLATFORMS[:, 1], PLATFORMS[:, 2]
+    left, right = px, px + pw
+
+    overlap   = (x + ew > left) & (x < right)    # horizontal overlap with each platform
+    on_level  = (py == y)                         # platforms that belong to this level
+    return jnp.any(overlap & on_level)            # reduction (no px[mask], etc.)
+
+
+
+
 
 
 def check_collision(pos: jnp.ndarray, vel: jnp.ndarray, platforms: jnp.ndarray, pow_block: jnp.ndarray, pow_block_counter:int):
@@ -343,17 +364,24 @@ def spawn_enemy(enemy:new_Enemy, side: int, idx: int) -> new_Enemy:
 def check_enemy_fall(enemy: new_Enemy, idx: int) -> new_Enemy:
     x = enemy.enemy_pos[idx, 0]
     plat = enemy.enemy_platform_idx[idx]
-    # falls nach rechts unterwegs:
-    def fall_right(e: new_Enemy):
-        cond = x > PLATFORMS_X[plat, 1]
-        status = e.enemy_status.at[idx].set(jnp.where(cond, 3, e.enemy_status[idx]))
-        return e._replace(enemy_status=status)
-    # falls nach links unterwegs:
-    def fall_left(e: new_Enemy):
-        cond = x < PLATFORMS_X[plat, 0]
-        status = e.enemy_status.at[idx].set(jnp.where(cond, 3, e.enemy_status[idx]))
-        return e._replace(enemy_status=status)
-    return lax.cond(enemy.enemy_dir[idx] > 0, fall_right, fall_left, enemy)
+    # # falls nach rechts unterwegs:
+    # def fall_right(e: new_Enemy):
+    #     cond = x > PLATFORMS_X[plat, 1]
+    #     status = e.enemy_status.at[idx].set(jnp.where(cond, 3, e.enemy_status[idx]))
+    #     return e._replace(enemy_status=status)
+    # # falls nach links unterwegs:
+    # def fall_left(e: new_Enemy):
+    #     cond = x < PLATFORMS_X[plat, 0]
+    #     status = e.enemy_status.at[idx].set(jnp.where(cond, 3, e.enemy_status[idx]))
+    #     return e._replace(enemy_status=status)
+    # return lax.cond(enemy.enemy_dir[idx] > 0, fall_right, fall_left, enemy)
+
+    def do_check(e: new_Enemy):
+        still_supported = level_supported(x, ENEMY_SIZE[0], plat)
+        status = jnp.where(still_supported, e.enemy_status[idx], 3)
+        return e._replace(enemy_status=e.enemy_status.at[idx].set(status))
+
+    return lax.cond(plat >= 0, do_check, lambda e: e, enemy)
 
 def spawned(idx: int, enemy: new_Enemy) -> new_Enemy:
     def not_strong(e: new_Enemy):
@@ -370,14 +398,16 @@ def spawned(idx: int, enemy: new_Enemy) -> new_Enemy:
             new_x_wrapped = jnp.where(new_x < screen_left, screen_right,
                             jnp.where(new_x > screen_right, screen_left, new_x))
 
-            over_left = new_x_wrapped < PLATFORMS_X[plat, 0]
-            over_right = new_x_wrapped > PLATFORMS_X[plat, 1]
-            platform_end = over_left | over_right
+            # over_left = new_x_wrapped < PLATFORMS_X[plat, 0]
+            # over_right = new_x_wrapped > PLATFORMS_X[plat, 1]
+            # platform_end = over_left | over_right
 
-            new_dir = jnp.where(platform_end, -dir, dir)
+            # Will the NEXT x still be supported on this level?
+            on_segment_next = level_supported(new_x_wrapped, ENEMY_SIZE[0], plat)
+            new_dir = jnp.where(on_segment_next, dir, -dir)
 
-            new_pos = e2.enemy_pos.at[idx].set(jnp.array([new_x_wrapped, y]))
-            new_enemy_dir = e2.enemy_dir.at[idx].set(new_dir)
+            new_pos      = e2.enemy_pos.at[idx].set(jnp.array([new_x_wrapped, y]))
+            new_enemy_dir= e2.enemy_dir.at[idx].set(new_dir)
 
             return e2._replace(enemy_pos=new_pos, enemy_dir=new_enemy_dir)
 
@@ -418,7 +448,9 @@ def new_enemy_step(idx: int, enemy: new_Enemy) -> new_Enemy:
         new_y = jnp.minimum(y + DESCEND_VY, target_y)
         e = e._replace(enemy_pos=e.enemy_pos.at[idx, 1].set(new_y))
 
-        has_landed = (y + DESCEND_VY >= target_y)
+        # has_landed = (y + DESCEND_VY >= target_y)
+        has_landed = (new_y == target_y)
+
 
         def landed(e2: new_Enemy):
             return e2._replace(
