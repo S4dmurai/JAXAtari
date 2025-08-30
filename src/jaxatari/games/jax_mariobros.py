@@ -385,35 +385,39 @@ def check_enemy_fall(enemy: new_Enemy, idx: int) -> new_Enemy:
 
 def spawned(idx: int, enemy: new_Enemy) -> new_Enemy:
     def not_strong(e: new_Enemy):
-        def no_move(e2: new_Enemy):
-            # horizontale Bewegung + ggf. Richtungswechsel + Wraparound
+        def move_e(e2: new_Enemy):
             x, y = e2.enemy_pos[idx]
             dir = e2.enemy_dir[idx]
             plat = e2.enemy_platform_idx[idx]
 
-            screen_left = 0
-            screen_right = SCREEN_WIDTH - ENEMY_SIZE[0]
-
             new_x = x + dir
-            new_x_wrapped = jnp.where(new_x < screen_left, screen_right,
-                            jnp.where(new_x > screen_right, screen_left, new_x))
+            screen_left = 0
+            screen_right = SCREEN_WIDTH - ENEMY_SIZE[0]  # enemy width
 
-            # over_left = new_x_wrapped < PLATFORMS_X[plat, 0]
-            # over_right = new_x_wrapped > PLATFORMS_X[plat, 1]
-            # platform_end = over_left | over_right
+            # Condition if enemy on ground floor and beyond horizontal screen limits
+            on_ground_floor = (plat == 0)
+            beyond_left = new_x < screen_left
+            beyond_right = new_x > screen_right
+            should_teleport_up = on_ground_floor & (beyond_left | beyond_right)
 
-            # Will the NEXT x still be supported on this level?
-            on_segment_next = level_supported(new_x_wrapped, ENEMY_SIZE[0], plat)
-            new_dir = jnp.where(on_segment_next, dir, -dir)
+            # Teleport function wrapper for this enemy index
+            def do_teleport(_):
+                return teleport_to_top(idx, e2)
 
-            new_pos      = e2.enemy_pos.at[idx].set(jnp.array([new_x_wrapped, y]))
-            new_enemy_dir= e2.enemy_dir.at[idx].set(new_dir)
+            # Normal wrapping function
+            def do_wrap(_):
+                final_x = jnp.where(new_x < screen_left, screen_right,
+                                    jnp.where(new_x > screen_right, screen_left, new_x))
+                new_pos = e2.enemy_pos.at[idx].set(jnp.array([final_x, y]))
+                return e2._replace(enemy_pos=new_pos)
 
-            return e2._replace(enemy_pos=new_pos, enemy_dir=new_enemy_dir)
+            # Conditionally teleport up or wrap
+            e2 = lax.cond(should_teleport_up, do_teleport, do_wrap, operand=None)
+            return e2
 
         return lax.cond(
             e.enemy_move[idx] == 0,
-            no_move,
+            move_e,
             lambda e2: e2._replace(enemy_move=e2.enemy_move.at[idx].set(e2.enemy_move[idx] - 1)),
             e
         )
@@ -431,6 +435,21 @@ def spawned(idx: int, enemy: new_Enemy) -> new_Enemy:
 
     return lax.cond(enemy.enemy_status[idx] != 2, not_strong, strong_case, enemy)
 
+
+def teleport_to_top(idx, enemy: new_Enemy):
+    side = jnp.where(enemy.enemy_dir[idx] > 0, 0, 1)  # Right movers to left side, left movers to right
+    spawn_pos = ENEMY_SPAWN[side]
+    direction = jnp.where(side > 0, -1, 1)
+    return enemy._replace(
+        enemy_pos=enemy.enemy_pos.at[idx].set(spawn_pos),
+        enemy_platform_idx=enemy.enemy_platform_idx.at[idx].set(3),  # 3 = top platform
+        enemy_status=enemy.enemy_status.at[idx].set(1),
+        enemy_dir=enemy.enemy_dir.at[idx].set(direction),
+        enemy_move=enemy.enemy_move.at[idx].set(ENEMY_MOVE),
+        weak_frames=enemy.weak_frames.at[idx].set(0)
+    )
+
+
 @jax.jit
 def new_enemy_step(idx: int, enemy: new_Enemy) -> new_Enemy:
     status = enemy.enemy_status[idx]
@@ -438,25 +457,20 @@ def new_enemy_step(idx: int, enemy: new_Enemy) -> new_Enemy:
     def handle_fall(e: new_Enemy):
         y = e.enemy_pos[idx, 1]
         plat_idx = e.enemy_platform_idx[idx]
-
         has_plat = plat_idx >= 0
         curr_plat = jnp.where(has_plat, plat_idx, 4)
         next_plat_idx = jnp.where(has_plat, curr_plat - 1, 3)
-
-        # 🐛 FIXED: use platform_y - enemy_height (not +8)
         target_y = PLATFORMS_Y[next_plat_idx] - ENEMY_SIZE[1]
         new_y = jnp.minimum(y + DESCEND_VY, target_y)
         e = e._replace(enemy_pos=e.enemy_pos.at[idx, 1].set(new_y))
-
-        # has_landed = (y + DESCEND_VY >= target_y)
         has_landed = (new_y == target_y)
 
-
         def landed(e2: new_Enemy):
+            # Instead of immediately teleporting at ground floor (0), just set status to horizontal move
             return e2._replace(
                 enemy_move=e2.enemy_move.at[idx].set(ENEMY_MOVE),
                 enemy_platform_idx=e2.enemy_platform_idx.at[idx].set(next_plat_idx),
-                enemy_status=e2.enemy_status.at[idx].set(1)
+                enemy_status=e2.enemy_status.at[idx].set(1)  # Move horizontally instead of teleporting
             )
 
         return lax.cond(has_landed, landed, lambda x: x, e)
@@ -465,6 +479,7 @@ def new_enemy_step(idx: int, enemy: new_Enemy) -> new_Enemy:
         return spawned(idx, e)
 
     return lax.cond(status == 3, handle_fall, handle_non_fall, enemy)
+
 
 @jax.jit
 def enemy_step(enemy: new_Enemy) -> new_Enemy:
