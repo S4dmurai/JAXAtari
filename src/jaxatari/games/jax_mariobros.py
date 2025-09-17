@@ -325,7 +325,6 @@ def check_enemy_spawn(enemy: new_Enemy) -> new_Enemy:
 
     # prüfen, ob eine Plattform idx == 3 existiert
     any_spawn = jnp.any(enemy.enemy_platform_idx == 3)
-    jax.debug.print("Spawn? = {}", any_spawn)
     first_zero_index = jnp.argmax(enemy.enemy_status == 0)
     side = enemy.enemy_spawn_idx
     def do_spawn(_):
@@ -409,7 +408,8 @@ def spawned(idx: int, enemy: new_Enemy) -> new_Enemy:
                 final_x = jnp.where(new_x < screen_left, screen_right,
                                     jnp.where(new_x > screen_right, screen_left, new_x))
                 new_pos = e2.enemy_pos.at[idx].set(jnp.array([final_x, y]))
-                return e2._replace(enemy_pos=new_pos)
+                new_move = e2.enemy_move.at[idx].set(ENEMY_MOVE)
+                return e2._replace(enemy_pos=new_pos, enemy_move=new_move)
 
             # Conditionally teleport up or wrap
             e2 = lax.cond(should_teleport_up, do_teleport, do_wrap, operand=None)
@@ -1223,7 +1223,6 @@ class JaxMarioBros(JaxEnvironment[
                 # Then call enemy_step:
                 new_enemy = enemy_step(state.game.enemy)
                 new_enemy = check_enemy_spawn(new_enemy)
-                jax.debug.print("Enemy = {}", new_enemy)
                 new_fireball = fireball_step(state.game.fireball)
                 # 4) Update enemy spawn delay timer (caps at ENEMY_SPAWN_FRAMES)
 
